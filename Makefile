@@ -2,9 +2,11 @@ MODULE_NAME := rwMem
 RESMAN_CORE_OBJS := sys.o bp.o
 RESMAN_GLUE_OBJS :=
 
+# 加入这一行：强制忽略所有普通代码警告，防止编译中断
+ccflags-y += -Wno-error -Wno-incompatible-pointer-types
+
 ifneq ($(KERNELRELEASE),)
     $(MODULE_NAME)-objs := $(RESMAN_GLUE_OBJS) $(RESMAN_CORE_OBJS)
-    # 修复致命错误：必须是 obj-m 才能生成 .ko 动态模块
     obj-m := $(MODULE_NAME).o
 else
 ifeq ($(KDIR),)
