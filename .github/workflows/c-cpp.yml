@@ -7,34 +7,33 @@ on:
 
 jobs:
   build:
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-latest
 
     steps:
-    - name: 📥 检出我们的驱动源码
-      uses: actions/checkout@v3
+    - name: Checkout Code
+      uses: actions/checkout@v4
 
-    - name: 🛠️ 安装底层编译环境
+    - name: Setup Environment
       run: |
         sudo apt-get update
         sudo apt-get install -y git build-essential bc bison flex libssl-dev clang lld llvm gcc-aarch64-linux-gnu
 
-    - name: 📦 拉取谷歌 Android 13 (GKI 5.15) 官方内核源码
+    - name: Clone GKI 5.15 Source
       run: |
         git clone --depth=1 -b android13-5.15 https://android.googlesource.com/kernel/common.git
 
-    - name: ⚙️ 初始化内核配置 (生成头文件)
+    - name: Prepare Kernel
       run: |
         cd common
         make ARCH=arm64 LLVM=1 CROSS_COMPILE=aarch64-linux-gnu- O=out gki_defconfig
         make ARCH=arm64 LLVM=1 CROSS_COMPILE=aarch64-linux-gnu- O=out modules_prepare
 
-    - name: 🚀 编译我们的 rwMem 驱动
+    - name: Build Driver
       run: |
-        # 将内核源码的 out 目录作为 KDIR 传给我们的 Makefile
         make KDIR=$(pwd)/common/out
 
-    - name: 📤 提取生成的 .ko 文件
-      uses: actions/upload-artifact@v3
+    - name: Upload Artifact
+      uses: actions/upload-artifact@v4
       with:
         name: rwMem-Driver
         path: "*.ko"
