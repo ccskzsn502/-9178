@@ -1,47 +1,53 @@
-name: Build GKI 5.15 Kernel Driver
+name: Build Custom GKI Kernel (Built-in rwMem)
 
 on:
-  push:
-    branches: [ "main", "master" ]
   workflow_dispatch:
 
 jobs:
   build:
-    runs-on: ubuntu-22.04
-
+    runs-on: ubuntu-latest
     steps:
-    - name: Checkout Code
+    - name: 📥 检出你的仓库代码
       uses: actions/checkout@v4
 
-    - name: Setup Environment
+    - name: 🛠️ 安装底层编译环境
       run: |
         sudo apt-get update
-        # 补齐了 libelf-dev 和 zlib1g-dev 解决 libbpf 报错
         sudo apt-get install -y git build-essential bc bison flex libssl-dev clang lld llvm gcc-aarch64-linux-gnu libelf-dev zlib1g-dev
 
-    - name: Clone GKI 5.15 Source
+    - name: 📦 拉取谷歌 Android 13 (GKI 5.15) 官方内核源码
       run: |
-        git clone --depth=1 -b android13-5.15 https://android.googlesource.com/kernel/common.git
+        # 我们拉取 5.15 的安卓官方源码作为“母体”
+        git clone --depth=1 -b android13-5.15 https://android.googlesource.com/kernel/common.git kernel-source
 
-    - name: Prepare Kernel
+    - name: 💉 缝合 rwMem 驱动到内核心脏
       run: |
-        cd common
+        # 1. 把你的 rwMem 源码文件夹复制到内核的驱动目录
+        cp -r rwMem kernel-source/drivers/
+        
+        # 2. 修改内核驱动的“说明书”，让它在编译时带上我们的 rwMem
+        echo "obj-y += rwMem/" >> kernel-source/drivers/Makefile
+        
+        # 3. 强制导出内核私有函数给我们的驱动用 (解决 Unknown symbol 的终极杀招)
+        # 我们直接在内核的 debug-monitors 里加上导出语句
+        echo 'EXPORT_SYMBOL(register_user_step_hook);' >> kernel-source/arch/arm64/kernel/debug-monitors.c
+        echo 'EXPORT_SYMBOL(unregister_user_step_hook);' >> kernel-source/arch/arm64/kernel/debug-monitors.c
+
+    - name: 🩹 施加 0xcb VIP 补丁
+      run: |
+        cd kernel-source
+        # 自动定位 perf_event.h 并打入补丁
+        sed -i '/return true;/i \	if(unlikely(((uint64_t)(event->overflow_handler_context) >> 56) == 0xcb)){ return true; }' include/linux/perf_event.h
+
+    - name: ⚙️ 开始炼制内核 (可能会跑 20-40 分钟)
+      run: |
+        cd kernel-source
         make ARCH=arm64 LLVM=1 CROSS_COMPILE=aarch64-linux-gnu- O=out gki_defconfig
-        
-        # 核心必杀技：直接阉割掉内核的 BTF 调试信息，彻底规避 resolve_btfids 报错
-        scripts/config --file out/.config -d DEBUG_INFO_BTF
-        make ARCH=arm64 LLVM=1 CROSS_COMPILE=aarch64-linux-gnu- O=out olddefconfig
-        
-        # 生成编译驱动所需的头文件和依赖
-        make ARCH=arm64 LLVM=1 CROSS_COMPILE=aarch64-linux-gnu- O=out modules_prepare
+        # 开启我们自定义驱动的编译选项 (obj-y 会自动包含)
+        make ARCH=arm64 LLVM=1 CROSS_COMPILE=aarch64-linux-gnu- O=out -j$(nproc) Image
 
-    - name: Build Driver
-      run: |
-        # 开始编译你的 rwMem 源码！
-        make KDIR=$(pwd)/common/out
-
-    - name: Upload Artifact
+    - name: 📤 提取炼制好的内核镜像 (Image)
       uses: actions/upload-artifact@v4
       with:
-        name: rwMem-Driver
-        path: "*.ko"
+        name: Custom-Kernel-Image
+        path: kernel-source/out/arch/arm64/boot/Image
