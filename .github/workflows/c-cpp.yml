@@ -7,7 +7,7 @@ on:
 
 jobs:
   build:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
 
     steps:
     - name: Checkout Code
@@ -16,7 +16,8 @@ jobs:
     - name: Setup Environment
       run: |
         sudo apt-get update
-        sudo apt-get install -y git build-essential bc bison flex libssl-dev clang lld llvm gcc-aarch64-linux-gnu
+        # 补齐了 libelf-dev 和 zlib1g-dev 解决 libbpf 报错
+        sudo apt-get install -y git build-essential bc bison flex libssl-dev clang lld llvm gcc-aarch64-linux-gnu libelf-dev zlib1g-dev
 
     - name: Clone GKI 5.15 Source
       run: |
@@ -26,10 +27,17 @@ jobs:
       run: |
         cd common
         make ARCH=arm64 LLVM=1 CROSS_COMPILE=aarch64-linux-gnu- O=out gki_defconfig
+        
+        # 核心必杀技：直接阉割掉内核的 BTF 调试信息，彻底规避 resolve_btfids 报错
+        scripts/config --file out/.config -d DEBUG_INFO_BTF
+        make ARCH=arm64 LLVM=1 CROSS_COMPILE=aarch64-linux-gnu- O=out olddefconfig
+        
+        # 生成编译驱动所需的头文件和依赖
         make ARCH=arm64 LLVM=1 CROSS_COMPILE=aarch64-linux-gnu- O=out modules_prepare
 
     - name: Build Driver
       run: |
+        # 开始编译你的 rwMem 源码！
         make KDIR=$(pwd)/common/out
 
     - name: Upload Artifact
