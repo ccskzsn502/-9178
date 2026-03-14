@@ -1,53 +1,68 @@
-name: Build Custom GKI Kernel (Built-in rwMem)
+name: Build Custom GKI Kernel (Ultimate Edition)
 
 on:
-  workflow_dispatch:
+  workflow_dispatch: # 手动点击运行
 
 jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-    - name: 📥 检出你的仓库代码
+    - name: 📥 检出仓库代码
       uses: actions/checkout@v4
 
-    - name: 🛠️ 安装底层编译环境
+    - name: 🛠️ 准备交叉编译环境
       run: |
         sudo apt-get update
-        sudo apt-get install -y git build-essential bc bison flex libssl-dev clang lld llvm gcc-aarch64-linux-gnu libelf-dev zlib1g-dev
+        sudo apt-get install -y git build-essential bc bison flex libssl-dev clang lld llvm gcc-aarch64-linux-gnu libelf-dev zlib1g-dev libncurses-dev
 
-    - name: 📦 拉取谷歌 Android 13 (GKI 5.15) 官方内核源码
+    - name: 📦 拉取安卓官方 GKI 5.15 源码
       run: |
-        # 我们拉取 5.15 的安卓官方源码作为“母体”
+        # 拉取 Android 13 对应的 5.15 核心源码
         git clone --depth=1 -b android13-5.15 https://android.googlesource.com/kernel/common.git kernel-source
 
-    - name: 💉 缝合 rwMem 驱动到内核心脏
+    - name: 💉 自动化缝合驱动与补丁
       run: |
-        # 1. 把你的 rwMem 源码文件夹复制到内核的驱动目录
-        cp -r rwMem kernel-source/drivers/
+        # 1. 自动化寻找 rwMem 文件夹位置 (解决 cp 报错)
+        RW_PATH=$(find . -maxdepth 3 -name "rwMem" -type d | head -n 1)
+        if [ -z "$RW_PATH" ]; then echo "❌ 仓库里找不到 rwMem 文件夹，请检查名称是否正确！"; exit 1; fi
+        echo "✅ 发现驱动路径: $RW_PATH"
         
-        # 2. 修改内核驱动的“说明书”，让它在编译时带上我们的 rwMem
+        # 2. 将驱动移植进内核肉体
+        cp -r "$RW_PATH" kernel-source/drivers/
+        
+        # 3. 修改内核驱动 Makefile
         echo "obj-y += rwMem/" >> kernel-source/drivers/Makefile
         
-        # 3. 强制导出内核私有函数给我们的驱动用 (解决 Unknown symbol 的终极杀招)
-        # 我们直接在内核的 debug-monitors 里加上导出语句
+        # 4. 【核心黑科技】强制导出私有符号 (解决 Unknown symbol)
+        # 我们直接把这些导出语句写进内核核心文件，让它开机就自带这些函数
+        echo -e "\n#include <linux/export.h>" >> kernel-source/arch/arm64/kernel/debug-monitors.c
         echo 'EXPORT_SYMBOL(register_user_step_hook);' >> kernel-source/arch/arm64/kernel/debug-monitors.c
         echo 'EXPORT_SYMBOL(unregister_user_step_hook);' >> kernel-source/arch/arm64/kernel/debug-monitors.c
+        
+        # 有些版本可能还需要导出 task_work_add
+        echo 'EXPORT_SYMBOL(task_work_add);' >> kernel-source/kernel/task_work.c || true
 
-    - name: 🩹 施加 0xcb VIP 补丁
+    - name: 🩹 施加 0xcb VIP 后门补丁
+      run: |
+        TARGET_H="kernel-source/include/linux/perf_event.h"
+        # 使用 sed 精准插入 0xcb 逻辑
+        sed -i '/return true;/i \	if(unlikely(((uint64_t)(event->overflow_handler_context) >> 56) == 0xcb)){ return true; }' "$TARGET_H"
+        echo "✅ 0xcb 补丁注入成功"
+
+    - name: ⚙️ 炼制 Image 内核镜像
       run: |
         cd kernel-source
-        # 自动定位 perf_event.h 并打入补丁
-        sed -i '/return true;/i \	if(unlikely(((uint64_t)(event->overflow_handler_context) >> 56) == 0xcb)){ return true; }' include/linux/perf_event.h
-
-    - name: ⚙️ 开始炼制内核 (可能会跑 20-40 分钟)
-      run: |
-        cd kernel-source
+        # 使用 GKI 标准配置
         make ARCH=arm64 LLVM=1 CROSS_COMPILE=aarch64-linux-gnu- O=out gki_defconfig
-        # 开启我们自定义驱动的编译选项 (obj-y 会自动包含)
-        make ARCH=arm64 LLVM=1 CROSS_COMPILE=aarch64-linux-gnu- O=out -j$(nproc) Image
+        
+        # 开始编译 (j2 是为了防止 GitHub 免费服务器内存溢出，稳一点)
+        make ARCH=arm64 LLVM=1 CROSS_COMPILE=aarch64-linux-gnu- O=out -j2 Image
+        
+        # 检查产物是否存在
+        if [ ! -f "out/arch/arm64/boot/Image" ]; then echo "❌ 编译失败，未生成 Image"; exit 1; fi
 
-    - name: 📤 提取炼制好的内核镜像 (Image)
+    - name: 📤 提取成果 (Image)
       uses: actions/upload-artifact@v4
       with:
-        name: Custom-Kernel-Image
+        name: My-Custom-Kernel
         path: kernel-source/out/arch/arm64/boot/Image
