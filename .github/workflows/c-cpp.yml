@@ -1,4 +1,4 @@
-name: Build Custom GKI Kernel (Final Fixed)
+name: Build Custom GKI Kernel (Anti-OOM Edition)
 
 on:
   workflow_dispatch:
@@ -17,33 +17,32 @@ jobs:
 
     - name: 📦 拉取安卓官方 GKI 5.15 源码
       run: |
+        # 拉取 5.15 核心源码，这是“母体”
         git clone --depth=1 -b android13-5.15 https://android.googlesource.com/kernel/common.git kernel-source
 
-    - name: 💉 自动化缝合驱动与补丁
+    - name: 💉 自动化缝合驱动与符号导出
       run: |
-        # 1. 创建目录并收集零件
+        # 1. 创建驱动目录并强力搜集零件
         mkdir -p kernel-source/drivers/rwMem
-        # 排除 kernel-source 目录，搜索并复制所有源码到驱动目录
         find . -maxdepth 3 -path "./kernel-source" -prune -o -name "*.c" -exec cp {} kernel-source/drivers/rwMem/ \;
         find . -maxdepth 3 -path "./kernel-source" -prune -o -name "*.h" -exec cp {} kernel-source/drivers/rwMem/ \;
         find . -maxdepth 3 -path "./kernel-source" -prune -o -name "Makefile" -exec cp {} kernel-source/drivers/rwMem/ \;
         
-        # 2. 修改 Makefile
+        # 2. 将驱动焊进内核 Makefile
         echo "obj-y += rwMem/" >> kernel-source/drivers/Makefile
         
-        # 3. 强行导出内核私有函数
+        # 3. 【核心】强行公开内核私有函数，解决 Unknown symbol 报错
         echo -e "\n#include <linux/export.h>" >> kernel-source/arch/arm64/kernel/debug-monitors.c
         echo 'EXPORT_SYMBOL(register_user_step_hook);' >> kernel-source/arch/arm64/kernel/debug-monitors.c
         echo 'EXPORT_SYMBOL(unregister_user_step_hook);' >> kernel-source/arch/arm64/kernel/debug-monitors.c
 
-    - name: 🩹 施加精准 0xcb 补丁 (Python 强力版)
+    - name: 🩹 施加精准 0xcb 补丁 (Python 版)
       run: |
         python3 - <<EOF
         import os
         path = "kernel-source/include/linux/perf_event.h"
         with open(path, 'r') as f:
             lines = f.readlines()
-        
         new_lines = []
         found = False
         for line in lines:
@@ -51,20 +50,25 @@ jobs:
             if "static inline bool uses_default_overflow_handler(struct perf_event *event)" in line:
                 found = True
             if found and "{" in line:
-                # 在找到函数名后的第一个大括号后面插入我们的代码
                 new_lines.append("\tif(unlikely(((uint64_t)(event->overflow_handler_context) >> 56) == 0xcb)){ return true; }\n")
-                found = False # 只插一次
-        
+                found = False
         with open(path, 'w') as f:
             f.writelines(new_lines)
         print("✅ Python 补丁注入成功")
         EOF
 
-    - name: ⚙️ 炼制 Image 内核镜像
+    - name: ⚙️ 炼制 Image 内核镜像 (强制关闭 LTO 防止崩溃)
       run: |
         cd kernel-source
+        # 1. 配置默认 GKI 选项
         make ARCH=arm64 LLVM=1 CROSS_COMPILE=aarch64-linux-gnu- O=out gki_defconfig
-        # 使用 -j2 保证稳定性
+        
+        # 2. 【绝杀招】强行关闭 LTO，防止 GitHub 内存溢出导致 Terminated
+        ./scripts/config --file out/.config --disable LTO_CLANG_THIN
+        ./scripts/config --file out/.config --disable LTO_CLANG_FULL
+        ./scripts/config --file out/.config --set-str LTO_NONE y
+        
+        # 3. 开始编译
         make ARCH=arm64 LLVM=1 CROSS_COMPILE=aarch64-linux-gnu- O=out -j2 Image
 
     - name: 📤 提取成果 (Image)
