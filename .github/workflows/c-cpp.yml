@@ -1,4 +1,4 @@
-name: Build Custom GKI Kernel (Fixed Edition)
+name: Build Custom GKI Kernel (Final Fixed)
 
 on:
   workflow_dispatch:
@@ -13,7 +13,7 @@ jobs:
     - name: 🛠️ 准备交叉编译环境
       run: |
         sudo apt-get update
-        sudo apt-get install -y git build-essential bc bison flex libssl-dev clang lld llvm gcc-aarch64-linux-gnu libelf-dev zlib1g-dev libncurses-dev
+        sudo apt-get install -y git build-essential bc bison flex libssl-dev clang lld llvm gcc-aarch64-linux-gnu libelf-dev zlib1g-dev libncurses-dev python3
 
     - name: 📦 拉取安卓官方 GKI 5.15 源码
       run: |
@@ -23,30 +23,48 @@ jobs:
       run: |
         # 1. 创建目录并收集零件
         mkdir -p kernel-source/drivers/rwMem
-        find . -maxdepth 2 -name "*.c" -exec cp {} kernel-source/drivers/rwMem/ \;
-        find . -maxdepth 2 -name "*.h" -exec cp {} kernel-source/drivers/rwMem/ \;
-        find . -maxdepth 2 -name "Makefile" -exec cp {} kernel-source/drivers/rwMem/ \;
+        # 排除 kernel-source 目录，搜索并复制所有源码到驱动目录
+        find . -maxdepth 3 -path "./kernel-source" -prune -o -name "*.c" -exec cp {} kernel-source/drivers/rwMem/ \;
+        find . -maxdepth 3 -path "./kernel-source" -prune -o -name "*.h" -exec cp {} kernel-source/drivers/rwMem/ \;
+        find . -maxdepth 3 -path "./kernel-source" -prune -o -name "Makefile" -exec cp {} kernel-source/drivers/rwMem/ \;
         
         # 2. 修改 Makefile
         echo "obj-y += rwMem/" >> kernel-source/drivers/Makefile
         
-        # 3. 强行导出内核私有函数 (解决 Unknown symbol)
+        # 3. 强行导出内核私有函数
         echo -e "\n#include <linux/export.h>" >> kernel-source/arch/arm64/kernel/debug-monitors.c
         echo 'EXPORT_SYMBOL(register_user_step_hook);' >> kernel-source/arch/arm64/kernel/debug-monitors.c
         echo 'EXPORT_SYMBOL(unregister_user_step_hook);' >> kernel-source/arch/arm64/kernel/debug-monitors.c
 
-    - name: 🩹 施加精准 0xcb 补丁
+    - name: 🩹 施加精准 0xcb 补丁 (Python 强力版)
       run: |
-        TARGET_H="kernel-source/include/linux/perf_event.h"
-        # 【精准手术】只在特定的函数名后面插入逻辑
-        sed -i '/static inline bool uses_default_overflow_handler(struct perf_event \*event)/,/}/{ /^{/a \	if(unlikely(((uint64_t)(event->overflow_handler_context) >> 56) == 0xcb)){ return true; }' "$TARGET_H"
-        echo "✅ 精准补丁注入成功"
+        python3 - <<EOF
+        import os
+        path = "kernel-source/include/linux/perf_event.h"
+        with open(path, 'r') as f:
+            lines = f.readlines()
+        
+        new_lines = []
+        found = False
+        for line in lines:
+            new_lines.append(line)
+            if "static inline bool uses_default_overflow_handler(struct perf_event *event)" in line:
+                found = True
+            if found and "{" in line:
+                # 在找到函数名后的第一个大括号后面插入我们的代码
+                new_lines.append("\tif(unlikely(((uint64_t)(event->overflow_handler_context) >> 56) == 0xcb)){ return true; }\n")
+                found = False # 只插一次
+        
+        with open(path, 'w') as f:
+            f.writelines(new_lines)
+        print("✅ Python 补丁注入成功")
+        EOF
 
     - name: ⚙️ 炼制 Image 内核镜像
       run: |
         cd kernel-source
         make ARCH=arm64 LLVM=1 CROSS_COMPILE=aarch64-linux-gnu- O=out gki_defconfig
-        # 依然用 -j2 保证稳定性，防止内存溢出
+        # 使用 -j2 保证稳定性
         make ARCH=arm64 LLVM=1 CROSS_COMPILE=aarch64-linux-gnu- O=out -j2 Image
 
     - name: 📤 提取成果 (Image)
