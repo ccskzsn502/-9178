@@ -1,7 +1,7 @@
-name: Build Custom GKI Kernel (Ultimate Edition)
+name: Build Custom GKI Kernel (Fixed Edition)
 
 on:
-  workflow_dispatch: # 手动点击运行
+  workflow_dispatch:
 
 jobs:
   build:
@@ -17,49 +17,37 @@ jobs:
 
     - name: 📦 拉取安卓官方 GKI 5.15 源码
       run: |
-        # 拉取 Android 13 对应的 5.15 核心源码
         git clone --depth=1 -b android13-5.15 https://android.googlesource.com/kernel/common.git kernel-source
 
     - name: 💉 自动化缝合驱动与补丁
       run: |
-        # 1. 自动化寻找 rwMem 文件夹位置 (解决 cp 报错)
-        RW_PATH=$(find . -maxdepth 3 -name "rwMem" -type d | head -n 1)
-        if [ -z "$RW_PATH" ]; then echo "❌ 仓库里找不到 rwMem 文件夹，请检查名称是否正确！"; exit 1; fi
-        echo "✅ 发现驱动路径: $RW_PATH"
+        # 1. 创建目录并收集零件
+        mkdir -p kernel-source/drivers/rwMem
+        find . -maxdepth 2 -name "*.c" -exec cp {} kernel-source/drivers/rwMem/ \;
+        find . -maxdepth 2 -name "*.h" -exec cp {} kernel-source/drivers/rwMem/ \;
+        find . -maxdepth 2 -name "Makefile" -exec cp {} kernel-source/drivers/rwMem/ \;
         
-        # 2. 将驱动移植进内核肉体
-        cp -r "$RW_PATH" kernel-source/drivers/
-        
-        # 3. 修改内核驱动 Makefile
+        # 2. 修改 Makefile
         echo "obj-y += rwMem/" >> kernel-source/drivers/Makefile
         
-        # 4. 【核心黑科技】强制导出私有符号 (解决 Unknown symbol)
-        # 我们直接把这些导出语句写进内核核心文件，让它开机就自带这些函数
+        # 3. 强行导出内核私有函数 (解决 Unknown symbol)
         echo -e "\n#include <linux/export.h>" >> kernel-source/arch/arm64/kernel/debug-monitors.c
         echo 'EXPORT_SYMBOL(register_user_step_hook);' >> kernel-source/arch/arm64/kernel/debug-monitors.c
         echo 'EXPORT_SYMBOL(unregister_user_step_hook);' >> kernel-source/arch/arm64/kernel/debug-monitors.c
-        
-        # 有些版本可能还需要导出 task_work_add
-        echo 'EXPORT_SYMBOL(task_work_add);' >> kernel-source/kernel/task_work.c || true
 
-    - name: 🩹 施加 0xcb VIP 后门补丁
+    - name: 🩹 施加精准 0xcb 补丁
       run: |
         TARGET_H="kernel-source/include/linux/perf_event.h"
-        # 使用 sed 精准插入 0xcb 逻辑
-        sed -i '/return true;/i \	if(unlikely(((uint64_t)(event->overflow_handler_context) >> 56) == 0xcb)){ return true; }' "$TARGET_H"
-        echo "✅ 0xcb 补丁注入成功"
+        # 【精准手术】只在特定的函数名后面插入逻辑
+        sed -i '/static inline bool uses_default_overflow_handler(struct perf_event \*event)/,/}/{ /^{/a \	if(unlikely(((uint64_t)(event->overflow_handler_context) >> 56) == 0xcb)){ return true; }' "$TARGET_H"
+        echo "✅ 精准补丁注入成功"
 
     - name: ⚙️ 炼制 Image 内核镜像
       run: |
         cd kernel-source
-        # 使用 GKI 标准配置
         make ARCH=arm64 LLVM=1 CROSS_COMPILE=aarch64-linux-gnu- O=out gki_defconfig
-        
-        # 开始编译 (j2 是为了防止 GitHub 免费服务器内存溢出，稳一点)
+        # 依然用 -j2 保证稳定性，防止内存溢出
         make ARCH=arm64 LLVM=1 CROSS_COMPILE=aarch64-linux-gnu- O=out -j2 Image
-        
-        # 检查产物是否存在
-        if [ ! -f "out/arch/arm64/boot/Image" ]; then echo "❌ 编译失败，未生成 Image"; exit 1; fi
 
     - name: 📤 提取成果 (Image)
       uses: actions/upload-artifact@v4
